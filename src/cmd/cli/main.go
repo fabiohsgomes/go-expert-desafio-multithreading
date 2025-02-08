@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 )
 
@@ -22,21 +21,47 @@ func main() {
 		os.Exit(1)
 	}
 
+	viaCepResult := make(chan buscacep.CepResult)
+	brasilApiResult := make(chan buscacep.CepResult)
+
 	contextConfiguration := buscacep.NewContextConfigWithTimeOut(time.Second)
 
 	viaCepClient := buscacep.NewViaCepClient(contextConfiguration)
 	brasilApiClient := buscacep.NewBrasilApiClient(contextConfiguration)
 
-	wg := new(sync.WaitGroup)
-	wg.Add(2)
+	go runBuscaCepProcessor(viaCepResult, viaCepClient, cep)
+	go runBuscaCepProcessor(brasilApiResult, brasilApiClient, cep)
 
-	go runBuscaCepProcessor(wg, viaCepClient, cep)
-	go runBuscaCepProcessor(wg, brasilApiClient, cep)
+	select {
+	case result := <-viaCepResult:
+		printResult(&result)
+	case result := <-brasilApiResult:
+		printResult(&result)
+	case <-time.After(time.Second):
+		log.Println("Timeout: A requisição excedeu o tempo limite de 1 segundo.")
+	}
 
-	wg.Wait()
-
-	fmt.Println("Busca finalizada")
 	os.Exit(0)
+}
+
+func runBuscaCepProcessor(channel chan buscacep.CepResult, processor buscacep.BuscaCepProcessor, cep string) {
+	result, err := processor.BuscaCep(cep)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("ERR: A requisição excedeu o tempo limite de 1 segundo. Detalhe: %s", err.Error())
+		}
+
+		if errors.Is(err, context.Canceled) {
+			close(channel)
+			return
+		} else {
+			fmt.Println(err.Error())
+			close(channel)
+			return
+		}
+	}
+
+	channel <- result
 }
 
 func validaCep(cep string) (err error) {
@@ -51,23 +76,9 @@ func validaCep(cep string) (err error) {
 	return err
 }
 
-func runBuscaCepProcessor(wg *sync.WaitGroup, processor buscacep.BuscaCepProcessor, cep string) {
-	defer wg.Done()
-
-	result, err := processor.BuscaCep(cep)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("ERR: A requisição excedeu o tempo limite de 1 segundo. Detalhe: %s", err.Error())
-			return
-		}
-
-		if errors.Is(err, context.Canceled) {
-			return
-		}
-
-		fmt.Println(err.Error())
-		return
+func printResult(result *buscacep.CepResult) {
+	if (buscacep.CepResult{}) != *result {
+		fmt.Println(result)
+		fmt.Println("Busca finalizada")
 	}
-
-	fmt.Println(result)
 }
